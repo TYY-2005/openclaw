@@ -222,7 +222,7 @@ describe("memory synchronization of canonical SQLite transcripts", () => {
         await fs.writeFile(archivePath, archive);
       }
 
-      await sync(damaged ? undefined : { force: true });
+      await sync(damaged ? { reason: "cli", force: true } : { force: true });
       expect(matches("violet")).toEqual([
         { text: "User: My violet preference is documented here." },
       ]);
