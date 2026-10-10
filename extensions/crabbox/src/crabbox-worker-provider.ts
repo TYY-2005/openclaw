@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { coerceErrorMessage, toErrorObject } from "openclaw/plugin-sdk/error-runtime";
+import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import {
   WorkerProviderError,
   type WorkerLeaseStatus,
@@ -265,10 +265,8 @@ export function createCrabboxWorkerProvider(
       deadline +
       countCrabboxProvisionSetupPhases(parsed) * CRABBOX_SETUP_TIMEOUT_MS +
       2 * nodeBootstrapTimeoutMs +
-      (project
-        ? CRABBOX_PROJECT_PREPARATION_TIMEOUT_MS +
-          resolveCrabboxWarmImageCaptureTimeoutMs(parsed.provider)
-        : 0);
+      (project ? CRABBOX_PROJECT_PREPARATION_TIMEOUT_MS : 0) +
+      (parsed.warmImage ? resolveCrabboxWarmImageCaptureTimeoutMs(parsed.provider) : 0);
     const context = { binary, provider: parsed.provider };
     const leaseId = allocation.leaseId;
     if (parsed.desktop && parsed.provider === "hetzner") {
@@ -382,23 +380,28 @@ export function createCrabboxWorkerProvider(
           return await failProvisionAfterCleanup({ ...context, id: leaseId, stopLease }, error);
         }
       }
-      if (project && (await warmImages.lookupLease(leaseId))?.phase !== "enrolled") {
+      let runtimePrepared = false;
+      if (parsed.warmImage && (await warmImages.lookupLease(leaseId))?.phase !== "enrolled") {
         let preparationFailed = false;
         let captured: boolean;
         try {
-          const preparedProject = await prepareCrabboxProjectFiles({
-            ...context,
-            id: leaseId,
-            project,
-            runCommand,
-            signal: preparationSignal,
-            timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
-          });
+          const preparedProject = project
+            ? await prepareCrabboxProjectFiles({
+                ...context,
+                id: leaseId,
+                project,
+                runCommand,
+                signal: preparationSignal,
+                timeoutMs: () => remainingProvisionTimeout(setupDeadline, CRABBOX_SETUP_TIMEOUT_MS),
+              })
+            : undefined;
           assertCurrent();
-          await warmImages.markPrepared(leaseId, project.baseCommit, () => {
-            preparationSignal?.throwIfAborted();
-            assertCurrent();
-          });
+          if (project) {
+            await warmImages.markPrepared(leaseId, project.baseCommit, () => {
+              preparationSignal?.throwIfAborted();
+              assertCurrent();
+            });
+          }
           captured = await warmImages.capture(
             {
               ...context,
@@ -415,7 +418,7 @@ export function createCrabboxWorkerProvider(
             },
             async (scrubScript) => {
               if (!options?.prepareNodeRuntime) {
-                throw new Error("Crabbox project snapshots require node runtime preparation");
+                throw new Error("Crabbox snapshots require node runtime preparation");
               }
               const runtime = await options.prepareNodeRuntime();
               signal?.throwIfAborted();
@@ -440,6 +443,7 @@ export function createCrabboxWorkerProvider(
                       ? AbortSignal.any([preparationSignal, runtime.signal])
                       : (preparationSignal ?? runtime.signal),
                 });
+                runtimePrepared = true;
               } catch (error) {
                 // The command owner settles setup failure and cleanup; do not stop it twice.
                 preparationFailed = true;
@@ -476,7 +480,7 @@ export function createCrabboxWorkerProvider(
       let enrollment: CrabboxWorkerNodeEnrollment;
       let runtimeSetupFailed = false;
       try {
-        if (!project && options?.prepareNodeRuntime) {
+        if (!project && !runtimePrepared && options?.prepareNodeRuntime) {
           const runtime = await options.prepareNodeRuntime();
           assertCurrent();
           const setup = createCrabboxNodeRuntimeSetup({
@@ -668,15 +672,8 @@ export function createCrabboxWorkerProvider(
             resolveCrabboxWarmImageCaptureTimeoutMs(parsed.provider))
       );
     },
-    resolveDestroyTimeoutMs(profile) {
-      const parsed = parseCrabboxProfile(profile);
-      // Lifecycle profiles omit placement sizing. Reserve capture unless disabled,
-      // plus separate heartbeat and stop child settlement.
-      return (
-        CRABBOX_STOP_TIMEOUT_MS +
-        2 * CRABBOX_COMMAND_SETTLEMENT_TIMEOUT_MS +
-        (parsed.warmImage === false ? 0 : resolveCrabboxWarmImageCaptureTimeoutMs(parsed.provider))
-      );
+    resolveDestroyTimeoutMs() {
+      return CRABBOX_STOP_TIMEOUT_MS + 2 * CRABBOX_COMMAND_SETTLEMENT_TIMEOUT_MS;
     },
     prepareProvision,
     async provision(...args) {
@@ -703,30 +700,9 @@ export function createCrabboxWorkerProvider(
       assertCrabboxLeaseId(lease.leaseId);
       // Stop renewal before binary acquisition can delay or fail teardown.
       await heartbeats.stop(lease.leaseId);
-      const { context, profile } = await resolveLeaseContext(lease);
-      // Lifecycle profiles omit placement overrides. Successful enrollment records
-      // the class and OS that own the warm policy and reusable image after restart.
-      let captureError: unknown;
-      try {
-        const allocation = await warmImages.lookupLease(context.id);
-        const captureProfile = resolveCrabboxWarmImageProfile(
-          profile,
-          allocation?.machineClass ?? profile.class,
-          allocation ? (allocation.os ?? "linux") : profile.target,
-        );
-        if (captureProfile.warmImage) {
-          await warmImages.capture({ ...context, profile: captureProfile });
-        }
-      } catch (error) {
-        captureError = error;
-      }
+      const { context } = await resolveLeaseContext(lease);
+      // Stop releases its source; optional image capture belongs before enrollment.
       await stopLease(context);
-      if (captureError) {
-        // Capture recovery remains recorded separately from confirmed source cleanup.
-        warn(
-          `Crabbox warm image capture failed during teardown: ${coerceErrorMessage(captureError)}`,
-        );
-      }
     },
   };
 }

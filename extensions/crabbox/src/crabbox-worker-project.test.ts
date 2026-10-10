@@ -908,7 +908,7 @@ exec "$CRABBOX_TEST_NODE" "$@"
         expect(
           (await listCrabboxWarmImages(crabboxState))[0]?.allocations[leaseId],
         ).toBeUndefined();
-        expect(warn).toHaveBeenCalledWith(expect.stringContaining(capture!.selector));
+        expect(warn).not.toHaveBeenCalled();
       }
       expect(calls.map(({ argv }) => argv[1])).toEqual(["stop"]);
       expect((await listCrabboxWarmImages(crabboxState))[0]?.capture).toMatchObject({

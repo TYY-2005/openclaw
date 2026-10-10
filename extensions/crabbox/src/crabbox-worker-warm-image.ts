@@ -202,7 +202,7 @@ export function createCrabboxWarmImageManager(dependencies: {
 
   const collectImages = async (
     context: RetirementContext,
-    phase: "allocation" | "teardown" | "maintenance",
+    phase: "allocation" | "capture" | "maintenance",
     entries: { key: string; value: WarmProfileRecord }[],
   ) => {
     const deadline = Date.now() + WARM_IMAGE_COMMAND_TIMEOUT_MS;
@@ -279,7 +279,7 @@ export function createCrabboxWarmImageManager(dependencies: {
   const collectProfileImages = async (
     context: CheckpointContext,
     key: string,
-    phase: "allocation" | "teardown",
+    phase: "allocation" | "capture",
   ) => {
     const value = await openStore().lookup(key);
     // Requests own only their selected profile; the service owns catalog-wide expiry.

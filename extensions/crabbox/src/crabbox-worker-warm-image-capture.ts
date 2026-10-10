@@ -41,7 +41,7 @@ export function createCrabboxWarmImageCapture(dependencies: {
   lookupLease: WarmImageStore["lookupLease"];
   assertCurrent: (context: LeaseContext) => void;
   warnOnce: (action: string, error: unknown, failed?: boolean) => void;
-  collectProfileImages: (context: LeaseContext, key: string, phase: "teardown") => Promise<void>;
+  collectProfileImages: (context: LeaseContext, key: string, phase: "capture") => Promise<void>;
   verifyImage: (
     context: LeaseContext,
     checkpointId: string,
@@ -91,14 +91,14 @@ export function createCrabboxWarmImageCapture(dependencies: {
     const attemptCapture = async () => {
       try {
         if (key) {
-          await collectProfileImages(context, key, "teardown");
+          await collectProfileImages(context, key, "capture");
         }
         if (
           !owner ||
           !key ||
           !owner.runtimeIdentity ||
           owner.demandAtMs === null ||
-          (owner.projectKey ? owner.phase !== "prepared" : owner.phase !== "enrolled")
+          (owner.projectKey ? owner.phase !== "prepared" : owner.phase !== "pending")
         ) {
           return;
         }
@@ -406,9 +406,8 @@ export function createCrabboxWarmImageCapture(dependencies: {
             // Keep persisted ownership recoverable; physical lease cleanup still belongs to stop.
           }
         }
-        // Required project captures must fail before enrollment. Optional teardown
-        // captures can warn and let source deletion complete.
-        if (preparing || (notSubmitted && owner?.projectKey)) {
+        // Runtime preparation and failed source recovery must stop before enrollment.
+        if (preparing || notSubmitted) {
           throw error;
         }
         warnOnce(
@@ -418,13 +417,12 @@ export function createCrabboxWarmImageCapture(dependencies: {
       }
     };
     await attemptCapture();
-    const operation =
-      key && owner?.projectKey ? (await openStore().lookup(key))?.operation : undefined;
+    const operation = key ? (await openStore().lookup(key))?.operation : undefined;
     // A native create may still be running after a lost response. Enrollment must
     // never introduce node credentials into that source until capture has settled.
     if (operation?.type === "capture" && operation.leaseId === context.id) {
       throw new Error(
-        `${captureError ? `${captureError}. ` : ""}Crabbox project image capture is unresolved. ${crabboxWarmImageRecoveryHint(operation.id)}`,
+        `${captureError ? `${captureError}. ` : ""}Crabbox ${owner?.projectKey ? "project" : "runtime"} image capture is unresolved. ${crabboxWarmImageRecoveryHint(operation.id)}`,
       );
     }
     assertCurrent(context);

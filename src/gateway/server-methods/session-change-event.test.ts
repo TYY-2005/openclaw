@@ -41,9 +41,21 @@ import type { GatewayRequestContext } from "./types.js";
 
 const mocks = vi.hoisted(() => ({
   invalidate: vi.fn(),
+  warn: vi.fn(),
   loadRow: vi.fn(),
   rowLabel: "first",
 }));
+
+vi.mock("../../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (subsystem: string) => {
+      const logger = actual.createSubsystemLogger(subsystem);
+      return subsystem === "gateway/session-events" ? { ...logger, warn: mocks.warn } : logger;
+    },
+  };
+});
 
 vi.mock("../session-sharing.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../session-sharing.js")>();
@@ -170,6 +182,7 @@ beforeEach((context) => {
   const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
   restorePerformanceClock = () => clock.mockRestore();
   context.onTestFinished(restorePerformanceClock);
+  mocks.warn.mockClear();
   mocks.invalidate();
   mocks.invalidate.mockClear();
   mocks.loadRow.mockReset().mockImplementation((key: string) => ({
@@ -186,6 +199,35 @@ afterEach(async () => {
 });
 
 describe("sessions.changed coalescing", () => {
+  it.each(["capture", "preparation"] as const)(
+    "records the %s failure message, code, and target before sending a refresh",
+    async (phase) => {
+      const context = createContext();
+      const projection = getSessionRowProjection(context)!;
+      const error = Object.assign(new Error("session worker unavailable"), { code: "SQLITE_BUSY" });
+      if (phase === "capture") {
+        vi.spyOn(projection, "capture").mockImplementationOnce(() => {
+          throw error;
+        });
+      } else {
+        vi.spyOn(projection, "withPreparedExactRows").mockRejectedValueOnce(error);
+      }
+      emitSessionsChanged(context, { sessionKey: "agent:main:diagnostic", reason: "patch" });
+      await flushPendingSessionsChangedEvents(context);
+      expect(mocks.warn).toHaveBeenCalledWith(`Session change ${phase} failed`, {
+        error: "session worker unavailable | SQLITE_BUSY",
+        sessionKey: "agent:main:diagnostic",
+        reason: "patch",
+      });
+      expect(context.broadcastToConnIds).toHaveBeenCalledWith(
+        "sessions.changed",
+        expect.objectContaining({ reason: "update" }),
+        expect.any(Set),
+        expect.any(Object),
+      );
+    },
+  );
+
   it("publishes catalog-only changes without invalidating session projections or access", async () => {
     const context = createContext();
     const changed = vi.fn();
